@@ -2,6 +2,10 @@ import gymnasium
 from gymnasium import spaces
 import numpy as np
 from typing import List, Dict, Any, Optional, Tuple
+from matplotlib import pyplot as plt
+import matplotlib.patches as patches
+from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
+import os
 
 
 # --- Constants for Actions ---
@@ -32,7 +36,7 @@ class LBHEnv(gymnasium.Env):
     - get_avail_actions()
     """
 
-    metadata = {"render_modes": ["human"], "render_fps": 4}
+    metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 4}
 
     def __init__(
         self,
@@ -57,6 +61,7 @@ class LBHEnv(gymnasium.Env):
         force_combat_first: bool = False,
         shaping_weight: float = 0.0, # Weight for the dense reward
         xp_reward_weight: float = 0.0, # Weight for the XP reward
+        icons: Optional[Dict[str, Any]] = None,
     ):
 
         """
@@ -93,6 +98,19 @@ class LBHEnv(gymnasium.Env):
         self.force_combat_first = force_combat_first
         self.shaping_weight = shaping_weight
         self.xp_reward_weight = xp_reward_weight
+
+        if icons is None:
+            # Get the directory where this file is located
+            lbh_dir = os.path.dirname(os.path.abspath(__file__))
+            self.icons = {
+                "agent": os.path.join(lbh_dir, 'icons/agent.png'),
+                "enemy": os.path.join(lbh_dir, 'icons/enemy.png'),
+                "data_center": os.path.join(lbh_dir, 'icons/data_center.png'),
+            }
+        else:
+            self.icons = icons
+
+        self._icon_cache = {}
         
         if min_hack_level > max_hack_level:
             raise ValueError("min_hack_level must be <= max_hack_level")
@@ -668,10 +686,14 @@ class LBHEnv(gymnasium.Env):
         Renders the environment in a human-readable format.
         (0, 0) is bottom-left corner.
         """
-        if mode != "human":
+        if mode == "human":
+            return self._render_human()
+        elif mode == "rgb_array":
+            return self._render_rgb()
+        else:
             raise NotImplementedError(f"Render mode {mode} not implemented")
 
-
+    def _render_human(self):
         grid_repr = [
             ["." for _ in range(self.grid_size[1])]
             for _ in range(self.grid_size[0])
@@ -716,6 +738,72 @@ class LBHEnv(gymnasium.Env):
         print(f"  Active Enemies: {self._active_enemies}/{self.n_enemies}")
         print(f"  Active Data Centers: {self._active_data_centers}/{self.n_data_centers}")
         print("-" * (self.grid_size[1] * 2 + 1))
+
+    def _render_rgb(self):
+        """
+        Renders the environment in a RGB array.
+        Returns a numpy array of shape (height, width, 3).
+        """
+        fig, ax = plt.subplots(figsize=(10, 10), dpi=300)
+
+        # 1. Setup Grid
+        ax.set_xlim(0, self.grid_size[1])
+        ax.set_ylim(0, self.grid_size[0])
+        ax.set_aspect('equal')
+        ax.set_xticks(np.arange(0, self.grid_size[1] + 1))
+        ax.set_yticks(np.arange(0, self.grid_size[0] + 1))
+        ax.grid(True, color='lightgray', linestyle='-', linewidth=1)
+        ax.set_xticklabels([])
+        ax.set_yticklabels([])
+        ax.tick_params(axis='both', which='both', length=0)
+
+        # 2. Draw Entities
+        def draw_image(ax, x, y, path, alpha=1.0):
+            if path not in self._icon_cache:
+                if os.path.exists(path):
+                    self._icon_cache[path] = plt.imread(path)
+                else:
+                    return False
+            img = self._icon_cache.get(path)
+            if img is not None:
+                ax.imshow(img, extent=[x, x + 1, y, y + 1], origin='upper', alpha=alpha)
+                return True
+            return False
+        
+        # Enemies
+        for e in self.enemies:
+            if e.active:
+                if not draw_image(ax, e.x, e.y, self.icons.get("enemy")):
+                    tri = patches.RegularPolygon((e.x + 0.5, e.y + 0.5), 3, 0.4, np.pi, facecolor='salmon', edgecolor='red')
+                    ax.add_patch(tri)
+                ax.text(e.x + 0.5, e.y + 0.35, str(e.threat_level), color='red', fontweight='bold', ha='center', va='center')
+
+        # Data Centers
+        for dc in self.data_centers:
+            if dc.active:
+                if not draw_image(ax, dc.x, dc.y, self.icons.get("data_center")):
+                    rect = patches.Rectangle((dc.x + 0.1, dc.y + 0.1), 0.8, 0.8, facecolor='lightgreen', edgecolor='green')
+                    ax.add_patch(rect)
+                ax.text(dc.x + 0.5, dc.y + 0.5, str(dc.security_level), color='red', fontweight='bold', ha='center', va='center')
+        
+        # Agents
+        for a in self.agents:
+            if not draw_image(ax, a.x, a.y, self.icons.get("agent")):
+                circ = patches.Circle((a.x + 0.5, a.y + 0.5), 0.35, facecolor='cornflowerblue', edgecolor='blue')
+                ax.add_patch(circ)
+            ax.text(a.x + 0.5, a.y + 0.5, f"A{a.id}\n{a.combat_skill}/{int(a.hacking_skill)}", 
+                    color='red', ha='center', va='center', fontsize=8, fontweight='bold')
+
+        plt.title(f"Step: {self._step_count} | Enemies: {self._active_enemies} | DCs: {self._active_data_centers}")
+
+        canvas = FigureCanvas(fig)
+        canvas.draw()
+        buf = canvas.buffer_rgba()
+        image_array = np.asarray(buf)[:, :, :3]
+
+        plt.close(fig)
+
+        return image_array
 
     def close(self):
         pass
